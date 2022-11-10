@@ -1,0 +1,155 @@
+function [PstLM, P_inst_max, P_inst] = Aalto_Light_flickermeter(u, fs)
+%
+% Description:
+% This MATLAB implementation of light flickermeter is accordance with IEC
+% TR 61547-1. It takes as inputs the light waveform (u) and its sampling
+% frequency (fs). fs should be higher than 2000 Hz. The duration of
+% measured waveform should be >20 seconds
+%
+% This implementation will output the following numbers:
+% PstLM : Short-term flicker metric
+% P_inst: Instantaneous flicker sensation P_inst
+% P_inst_max: the maximum of P_inst
+% 
+% COPYRIGHT Aalto University 2022
+% R. Nordlund, V. Mantela
+% Aalto University, Espoo Finland
+% V.1.1 17-10-2022
+% 
+%% Block A -- Input adapter
+
+% light waveform needs to be a row vector in this implementation
+% Teledyne LeCroy HDO4054 should give it as such, if format = MATLAB
+if ~isrow(u)
+    u = u';
+end
+
+u_norm = u/mean(u); % normalizing by mean
+u0ac = u_norm - mean(u_norm); % removing DC even before the highpass-filter, ...
+                        % to diminsh step change and filter transient
+t = 0:1/fs:(length(u)-1)/fs; % time vector needed for lsim()
+
+%% Block B -- Eye response
+
+% 1st order high pass filter, 
+
+f_hp = 0.05; % cut-off frequency
+tau_hp = 1/(2*pi*f_hp); % time constant
+fhp = tf([tau_hp, 0], [tau_hp, 1]); % filter transfer function
+p = pole(fhp); % poles of the filter 
+[z,k] = zero(fhp); % zeros and gain
+[zd,pd,kd] = bilinear(z,p,k,fs); % discretization by bilinear (Tustin's)
+fhpd = zpk(zd,pd,kd,1/fs); % to ZPK
+uhp = lsim(fhpd, u0ac, t); % filtration
+
+
+% 6th order Butterworth low-pass filter
+
+w0 = 2*pi*35; % cut-off frequency
+s1 = tf(1, [(1/w0)^2, 0.517638/w0, 1]); % first 2nd order
+s2 = tf(1, [(1/w0)^2, 1.414214/w0, 1]); % second 2nd order
+s3 = tf(1, [(1/w0)^2, 1.931852/w0, 1]); % third 2nd order
+fbw = s1*s2*s3; % cascading the three 2nd order filters
+p = pole(fbw); % poles
+[z,k] = zero(fbw); % zeros and gain
+[zd,pd,kd] = bilinear(z,p,k,fs); % discretization
+kd = abs(kd); % matlab inaccuacies want to add e-34 magnitude imaginary part
+fbwd = zpk(zd,pd,kd,1/fs); % to ZPK
+ubw = lsim(fbwd, uhp, t); % filtration
+
+
+% Weighting filter (eye-response)
+
+% Numerator coefficients
+N1 = 0.041661;
+N2 = 44.758;
+N3 = 2715.6;
+N4 = 29839;
+N5 = 0;
+num = [N1, N2, N3, N4, N5];
+
+% Denominator coefficients
+D1 = 1;
+D2 = 196.32;
+D3 = 11781;
+D4 = 534820;
+D5 = 3505380;
+den = [D1, D2, D3, D4, D5];
+
+fw = tf(num, den); % filter transferfunction
+p = pole(fw); % poles
+[z,k] = zero(fw); % zeros and gain
+[zd,pd,kd] = bilinear(z,p,k,fs); % discretization
+kd = abs(kd);
+fwd = zpk(zd,pd,kd,1/fs); % to ZPK
+uw = lsim(fwd, ubw, t); % filtration
+
+%% Block C -- Brain-response (Squaring and sliding mean) and scaling
+
+ub = uw.^2; %squaring
+
+tau_lp = 0.300; % time constant
+flp = tf(1, [tau_lp, 1]); % filter transfer function
+p = pole(flp); % poles
+[z,k] = zero(flp); % zeros and gain
+[zd,pd,kd] = bilinear(z,p,k,fs); % discretizatíon
+flpd = zpk(zd,pd,kd,1/fs); % to ZPK
+P_inst_us = lsim(flpd, ub, t); % filtration, unscaled P_inst
+
+
+% Scaling
+% For scaling factor _S_ calculation, see W. Mombauer, ..
+% "Calculating a new reference point for the IEC-flickermeter",
+% European Transactions on Electrical Power, vol.8, no.6, pp.429–436, 1998
+
+dE = 0.00630; % reference waveform relative change
+wf = 8.8*2*pi; % reference waveform frequency
+HP = abs(freqresp(fhpd,wf)); % amplitude response of highpass @8.8Hz
+BW = abs(freqresp(fbwd,wf)); % amplitude response of lowpass butter @8.8Hz
+W = abs(freqresp(fwd,wf)); % amplitude response of weighing @8.8Hz
+LP = abs(freqresp(flpd,2*wf)); % amplitude response of sliding mean @16.6Hz
+
+nimit = (((dE/2)*HP*BW*W)^2)*(1+LP); % denominator of S
+S = 2/nimit; 
+
+P_inst = S.*P_inst_us; % instantaneous flicker sensation P_inst
+%% Block D -- Statistical analysis
+
+% disregerding transient period
+t_T = 10; % seconds to be disregarded
+transient_period = t_T*fs; % disregarded period in samples
+P_inst_fin = P_inst(transient_period:end); % final P_inst signal after disregarding transient
+P_inst_max = max(P_inst_fin); % maximum of P_inst, used for scaling verification
+
+% cumulative distribution of P_inst
+[ff,xx] = ecdf(P_inst_fin); % empirical cumulative distribution of P_inst
+% ff is cumulative propability at value xx
+N_bins = 4096; % number of bins to be used 
+[n,c] = ecdfhist(ff,xx,N_bins); % n is height of bin, c is bin center
+nn = (n./sum(n)).*length(P_inst_fin); % nn is number samples of P_inst in a bin
+exceed_p = 100*(1-cumsum(nn)/sum(nn)); % propability of exceeding certain P_inst value 
+% the above propabilities correspond to values in c with the same index
+% also, sum nn should be = length(P_inst_fin)
+
+% percentage points, [1, 3, 10, 50] smoothed, 0.1 not
+P_01 = P_i(exceed_p, 0.1, c);
+P_1s = mean([P_i(exceed_p, 0.7, c),P_i(exceed_p, 1, c),P_i(exceed_p, 1.5, c)]);
+P_3s = mean([P_i(exceed_p, 2.2, c),P_i(exceed_p, 3, c),P_i(exceed_p, 4, c)]);
+P_10s = mean([P_i(exceed_p, 6, c),P_i(exceed_p, 8, c),P_i(exceed_p, 10, c),...
+    P_i(exceed_p, 10, c),P_i(exceed_p, 13, c),P_i(exceed_p, 17, c)]);
+P_50s = mean([P_i(exceed_p, 30, c),P_i(exceed_p, 50, c),P_i(exceed_p, 80, c)]);
+
+% calculationf of short-term flicker severity index PstLM
+PstLM = sqrt(0.0314*P_01 + 0.0525*P_1s + 0.0657*P_3s + 0.28*P_10s + 0.08*P_50s);
+end
+%%
+% Function to calculate the P_i values in block D
+% It finds the the index beyond which the propability of exceeding some value
+% becomes smaller than the given i-percentage. This means that c(idx), 
+% is the value, which is exceeded with propability i percent.
+
+function value = P_i(exceed_p, i_percent, c)
+idx = find(exceed_p > i_percent, 1, 'last'); 
+value = c(idx);
+end
+
