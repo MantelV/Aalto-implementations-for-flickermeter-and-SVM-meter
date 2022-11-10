@@ -1,0 +1,61 @@
+function SVM = Aalto_SVM_meter(u, fs) 
+% Description:
+% This MATLAB implementation of SVM meter is accordance with IEC
+% TR 61547-1. It takes as inputs the light waveform (u) and its sampling
+% frequency (fs). fs should be higher than 2000 Hz. The duration of
+% measured waveform should be >20 seconds
+%
+% This implementation will output the following numbers:
+% SVM : Stroboscopic Visibility Metric value
+% 
+% COPYRIGHT Aalto University 2022
+% R. Nordlund, V. Mantela
+% Aalto University, Espoo Finland
+% V.1.1 17-10-2022
+%
+%% Block A - Input adapter
+% use u = importdata(filename); before this SVM_meter
+% note the used sampling rate fs when doing the physical measurement
+
+% the digital light waveform u needs to be row vector (or the transpose of u' at Y = ... could be changed)
+if ~isrow(u)
+    u = u';
+end
+
+
+u = u/mean(u); % normalisation
+Ns = round(length(u)); % number of samples
+
+% zero-padding, or "nulling", to get even number of samples, otherwise not
+if mod(Ns,2) ~= 0 
+    Ns = Ns + 1;
+    u = [u, 0];
+end
+
+%% Blcoks B,C,D: Windowing, FFT, ->one sided spectrum, peak-finding, weighted sum
+
+cgcf = Ns/sum(hanning(Ns)); % coherent gain correction factor, should be around 2
+Y = cgcf*fft(hanning(Ns).*u')/Ns; % two-sided spectrum
+mag = abs(Y(1:round(Ns/2+1))); % taking the magnitude of the positive frequency side
+mag(2:end) = 2*mag(2:end); % doubling the 1-sided to compensate the loss of negative side
+fv = (0:fs/Ns:2000)'; % frequency vector up to 2 kHz
+Ci = mag(1:length(fv)); % magnitude vector up to 2 kHz, C_i in IEC TR 63158
+Ci(1:round(((Ns-2)/fs))*0.9) = 0; % kill DC component, and potential leaks up to around 0.9 Hz just to be sure
+
+
+[peaks,idx] = findpeaks(Ci, 'MinPeakDistance', (Ns-2)/fs); % minpeakdistance corresponding to 1 Hz
+w_peaks = peaks ./ sensitivity(fv(idx)); % weighting the peaks
+SVM = sum(w_peaks.^3.7).^(1/3.7); % minkowski distance, with norm parameter 3.7
+end
+%% sensitivity threshold function
+function T = sensitivity(f)
+a = 0.00518;
+b = 306.6;
+T = 1./(1+exp(-a*(f-b)))+20*exp(-f/10);
+end
+
+
+
+
+
+
